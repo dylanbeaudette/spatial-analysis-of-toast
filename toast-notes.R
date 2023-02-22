@@ -13,82 +13,102 @@ library(rasterVis)
 library(lattice)
 
 
-
+# extent set from pixels
 x <- rast('toast-grid.jpg')
+ext(x)
 plot(x)
 
+# # one-time only, digitize toast centers, kind of tedious
+# xy <- terra::click(x, n = 90, xy = TRUE, col = 'green')
+# write.csv(xy, file = 'points.csv', row.names = FALSE)
+# 
+
+# convert to CIELAB
 x.lab <- x
 values(x.lab) <- grDevices::convertColor(values(x) / 255, from = 'sRGB', to = 'Lab')
 names(x.lab) <- c('L', 'A', 'B')
 
+# check: ok
 plot(x.lab)
 
-# xy <- terra::click(x, n = 90, xy = TRUE)
-# write.csv(xy, file = 'points.csv', row.names = FALSE)
-
+# read digitized toast-centers
 xy <- read.csv('points.csv')
 
+# setup IDs
 names(xy) <- c('x', 'y', 'r', 'g', 'b')
-
 ids <- expand.grid(1:9, LETTERS[1:10])
 xy$id <- apply(ids, 1, function(i) {paste(i, collapse = '')})
 
 
+# init spatvect
+p <- vect(xy, geom = c('x', 'y'))
 
-p <- st_as_sf(xy,
-  coords = c('x', 'y')
-)
+# buffer for extracting values
+b <- buffer(p, width  = 15)
 
-b <- st_buffer(p, dist = 0.03, )
-
+# graphical check: ok
 plot(x)
-plot(st_geometry(b), border = 'green', add = TRUE)
+points(p)
+lines(b, col = 'green')
+text(crds(p), p$id, pos = 3, cex = 0.66, col = 'red', offset = 1.5)
 
-e <- extract(x.lab, vect(b), fun = mean, na.rm = TRUE)
 
+# mean LAB values within buffers
+e <- extract(x.lab, b, fun = mean, na.rm = TRUE)
+
+# fix names, IDs
 names(e) <- c('id', 'L', 'A', 'B')
-
 e$toast.id <- xy$id
 
-
+# check
 head(e)
 
+# back to sRGB
 .srgb <- grDevices::convertColor(e[, c('L', 'A', 'B')], from = 'Lab', to = 'sRGB', from.ref.white = 'D65', to.ref.white = 'D65')
 
 e$r <- .srgb[, 1]
 e$g <- .srgb[, 2]
 e$b <- .srgb[, 3]
 
+# Munsell notation
 m <- rgb2munsell(e[, c('r', 'g', 'b')])
 m$m <- sprintf('%s %s/%s', m$hue, m$value, m$chroma)
 m$col <- rgb(e[, c('r', 'g', 'b')], maxColorValue = 1)
 
-
-
-
+# annotate with Munsell colors
 plot(x, mar = c(0, 0, 0, 0))
-text(xy$x, xy$y, labels = m$m, col = invertLabelColor(m$col), cex = 0.75, font = 2)
+text(xy$x, xy$y, labels = m$m, col = invertLabelColor(m$col), cex = 0.7, font = 2)
 
-sort(table(m$m))
+# most frequent colors?
+sort(table(m$m), decreasing = TRUE)
 
+# mean toast colors on the L ~ A plane
 plot(e$A, e$L, type = 'n')
 points(e$A, e$L, pch = 15, col = m$col, cex = 4)
 text(e$A, e$L, labels = e$toast.id, col = invertLabelColor(m$col), cex = 0.66)
 
 
-plot(m$chroma, m$value, type = 'n')
-points(m$chroma, m$value, pch = 15, col = m$col, cex = 4)
 
 
 
-d <- farver::compare_colour(e[, c('L', 'A', 'B')], from_space='lab', white_from = 'D65', method='cie2000')
+d <- farver::compare_colour(
+  e[, c('L', 'A', 'B')], 
+  e[, c('L', 'A', 'B')], 
+  from_space='lab', 
+  white_from = 'D65', 
+  method='cie2000'
+)
+
 # copy over SPC ids
 dimnames(d) <- list(e$toast.id, e$toast.id)
-# convert to dist object
-d <- as.dist(t(d))
 
+# convert to dist object
+d <- as.dist(d)
+
+# NMDS
 mds <- sammon(d)
 
+# mean colors arranged via NMDS
 plot(mds$points[, 1], mds$points[, 2], type = 'n')
 points(mds$points[, 1], mds$points[, 2], pch = 15, col = m$col, cex = 4)
 text(mds$points[, 1], mds$points[, 2], labels = e$toast.id, col = invertLabelColor(m$col), cex = 0.66)
@@ -97,22 +117,23 @@ text(mds$points[, 1], mds$points[, 2], labels = e$toast.id, col = invertLabelCol
 par(mar = c(0, 0, 1, 0), mfcol = c(1, 2))
 plot(x, mar = c(0, 0, 1, 0), main = 'Original')
 plot(x, mar = c(0, 0, 1, 0), alpha = 1, main = 'Weighted Mean CIELAB')
-plot(st_geometry(b), col = m$col, add = TRUE)
+plot(b, col = m$col, add = TRUE)
+
+
+dev.off()
 
 
 
-
-
-
-plot(x)
-
-dir.create('slices')
+## crop original image into slices 
+unlink('slices', recursive = TRUE)
+dir.create('slices', recursive = TRUE)
 
 for(i in 1:nrow(b)) {
   f <- file.path('slices', sprintf("%03d.png", i))
   crop(x, b[i, ], filename = f, overwrite = TRUE) 
 }
 
+# remove side-car files
 unlink(x = 'slices/*.xml')
 
 par(mar = c(0.1, 0.1, 1.5, 0.1))
@@ -151,7 +172,7 @@ plot(.sl)
 
 # SpatRast -> sf -> sp -> gstat
 # sample
-s.pts <- spatSample(.sl, size = 1000, method = 'random', as.points = TRUE)
+s.pts <- spatSample(.sl, size = 1000, method = 'random', as.points = TRUE, lonlat = FALSE)
 names(s.pts) <- c('r', 'g', 'b')
 
 .lab <- grDevices::convertColor(as.data.frame(s.pts)[, c('r', 'g', 'b')] / 255, from = 'sRGB', to = 'Lab', from.ref.white = 'D65', to.ref.white = 'D65')
